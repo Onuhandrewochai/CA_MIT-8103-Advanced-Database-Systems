@@ -1,0 +1,79 @@
+{
+  "_id": 25,
+  "scheduled_at": "2024-01-01 07:00:00",
+  "month": "2024-01",
+  "branch": "CareBridge Lekki",
+  "reason": "BP review",
+  "patient": {
+    "hospital_no": "CBC-0021672",
+    "name": "Musa Nwosu",
+    "sex": "F",
+    "dob": "1991-11-20"
+  },
+  "doctor": {
+    "doctor_id": 25,
+    "name": "Dr Chinedu Lawal",
+    "department": "Paediatrics"
+  },
+  "diagnoses": [
+    {
+      "code": "A01.0",
+      "description": "Typhoid fever",
+      "primary": true
+    }
+  ],
+  "prescription": [
+    {
+      "medication": "Metformin",
+      "strength": "500mg",
+      "form": "tablet",
+      "dosage": "1 unit",
+      "frequency": "twice daily",
+      "days": 5,
+      "quantity": 10
+    },
+    {
+      "medication": "Omeprazole",
+      "strength": "20mg",
+      "form": "capsule",
+      "dosage": "1 unit",
+      "frequency": "twice daily",
+      "days": 5,
+      "quantity": 10
+    },
+    {
+      "medication": "Folic Acid",
+      "strength": "5mg",
+      "form": "tablet",
+      "dosage": "1 unit",
+      "frequency": "twice daily",
+      "days": 5,
+      "quantity": 10
+    }
+  ],
+  "labs": [
+    {
+      "test": "FBS",
+      "name": "Fasting blood sugar",
+      "result": "Positive",
+      "flag": "POSITIVE"
+    }
+  ],
+  "invoice": {
+    "invoice_id": 20,
+    "status": "PAID",
+    "lines": [
+      {
+        "description": "Consultation fee",
+        "amount": 10000.0
+      }
+    ],
+    "payments": [
+      {
+        "amount": 10000.0,
+        "method": "CASH",
+        "paid_at": "2024-01-01 08:05:00"
+      }
+    ]
+  }
+}

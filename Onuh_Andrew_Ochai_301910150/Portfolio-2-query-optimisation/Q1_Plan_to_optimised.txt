@@ -1,0 +1,68 @@
+-- Q1 Patient history (front desk / doctor opens a folder by hospital number)
+-- phase: optimised
+
+
+SELECT a.appointment_id, a.scheduled_at, a.status,
+       d.first_name || ' ' || d.last_name AS doctor,
+       dg.icd10_code, ic.description
+FROM patient p
+JOIN appointment a      ON a.patient_id = p.patient_id
+JOIN doctor d           ON d.doctor_id  = a.doctor_id
+LEFT JOIN diagnosis dg  ON dg.appointment_id = a.appointment_id
+LEFT JOIN icd10_code ic ON ic.code = dg.icd10_code
+WHERE p.hospital_no = 'CBC-0004321'
+ORDER BY a.scheduled_at DESC
+LIMIT 20;
+
+-- EXPLAIN (ANALYZE, BUFFERS)
+Limit  (cost=79.83..79.85 rows=10 width=93) (actual time=0.229..0.232 rows=20 loops=1)
+  Buffers: shared hit=448
+  ->  Sort  (cost=79.83..79.85 rows=10 width=93) (actual time=0.228..0.230 rows=20 loops=1)
+        Sort Key: a.scheduled_at DESC
+        Sort Method: top-N heapsort  Memory: 29kB
+        Buffers: shared hit=448
+        ->  Nested Loop Left Join  (cost=5.66..79.66 rows=10 width=93) (actual time=0.023..0.215 rows=53 loops=1)
+              Buffers: shared hit=448
+              ->  Nested Loop Left Join  (cost=5.53..78.10 rows=10 width=42) (actual time=0.022..0.180 rows=53 loops=1)
+                    Buffers: shared hit=366
+                    ->  Nested Loop  (cost=5.10..73.28 rows=10 width=37) (actual time=0.019..0.085 rows=53 loops=1)
+                          Buffers: shared hit=166
+                          ->  Nested Loop  (cost=4.96..71.68 rows=10 width=29) (actual time=0.017..0.050 rows=53 loops=1)
+                                Buffers: shared hit=60
+                                ->  Index Scan using patient_hospital_no_key on patient p  (cost=0.42..8.44 rows=1 width=4) (actual time=0.005..0.005 rows=1 loops=1)
+                                      Index Cond: ((hospital_no)::text = 'CBC-0004321'::text)
+                                      Buffers: shared hit=4
+                                ->  Bitmap Heap Scan on appointment a  (cost=4.54..63.10 rows=15 width=33) (actual time=0.011..0.038 rows=53 loops=1)
+                                      Recheck Cond: (p.patient_id = patient_id)
+                                      Heap Blocks: exact=53
+                                      Buffers: shared hit=56
+                                      ->  Bitmap Index Scan on idx_appt_patient_time  (cost=0.00..4.54 rows=15 width=0) (actual time=0.005..0.005 rows=53 loops=1)
+                                            Index Cond: (patient_id = p.patient_id)
+                                            Buffers: shared hit=3
+                          ->  Index Scan using doctor_pkey on doctor d  (cost=0.14..0.16 rows=1 width=16) (actual time=0.000..0.000 rows=1 loops=53)
+                                Index Cond: (doctor_id = a.doctor_id)
+                                Buffers: shared hit=106
+                    ->  Index Only Scan using diagnosis_pkey on diagnosis dg  (cost=0.42..0.47 rows=1 width=13) (actual time=0.002..0.002 rows=1 loops=53)
+                          Index Cond: (appointment_id = a.appointment_id)
+                          Heap Fetches: 41
+                          Buffers: shared hit=200
+              ->  Index Scan using icd10_code_pkey on icd10_code ic  (cost=0.14..0.15 rows=1 width=36) (actual time=0.000..0.000 rows=1 loops=53)
+                    Index Cond: ((code)::text = (dg.icd10_code)::text)
+                    Buffers: shared hit=82
+Planning:
+  Buffers: shared hit=53
+Planning Time: 0.612 ms
+Execution Time: 0.253 ms
+
+-- first rows of result (20 rows)
+['appointment_id', 'scheduled_at', 'status', 'doctor', 'icd10_code', 'description']
+(946036, datetime.datetime(2026, 9, 12, 10, 15, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600))), 'COMPLETED', 'Ibrahim Musa', 'B54', 'Unspecified malaria')
+(922250, datetime.datetime(2026, 8, 18, 11, 45, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600))), 'COMPLETED', 'Funmilayo Bello', 'H10.9', 'Conjunctivitis, unspecified')
+(918673, datetime.datetime(2026, 8, 14, 13, 15, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600))), 'CANCELLED', 'Chinedu Lawal', None, None)
+(910765, datetime.datetime(2026, 8, 6, 11, 45, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600))), 'COMPLETED', 'Chinedu Lawal', 'B54', 'Unspecified malaria')
+(907744, datetime.datetime(2026, 8, 3, 11, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600))), 'COMPLETED', 'Ibrahim Musa', 'L30.9', 'Dermatitis, unspecified')
+(770966, datetime.datetime(2026, 3, 14, 8, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600))), 'COMPLETED', 'Funmilayo Bello', 'A01.0', 'Typhoid fever')
+(753260, datetime.datetime(2026, 2, 23, 11, 45, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600))), 'COMPLETED', 'Emeka Okonkwo', 'B54', 'Unspecified malaria')
+(743515, datetime.datetime(2026, 2, 13, 10, 15, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600))), 'COMPLETED', 'Kemi Adeyemi', 'M54.5', 'Low back pain')
+(736107, datetime.datetime(2026, 2, 5, 12, 30, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600))), 'COMPLETED', 'Ngozi Abubakar', 'A01.0', 'Typhoid fever')
+(733049, datetime.datetime(2026, 2, 2, 11, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600))), 'CANCELLED', 'Aisha Uche', None, None)

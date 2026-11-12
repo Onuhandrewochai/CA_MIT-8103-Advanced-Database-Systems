@@ -1,0 +1,23 @@
+== 1. Configure the primary for replication
+ALTER SYSTEM
+ALTER SYSTEM
+ALTER SYSTEM
+ALTER SYSTEM
+ALTER SYSTEM
+ALTER SYSTEM
+DO
+== 2. Clone two streaming replicas with pg_basebackup (-R writes standby.signal + primary_conninfo)
+   replica1 up on :5433
+   replica2 up on :5434
+== 3. Two independent shard servers
+   shard_a up on :5441
+   shard_b up on :5442
+== Topology
+ application_name | client_addr |   state   | sync_state 
+------------------+-------------+-----------+------------
+ replica1         | 127.0.0.1   | streaming | async
+ replica2         | 127.0.0.1   | streaming | async
+(2 rows)
+
+:5433 in recovery (read-only standby) = true
+:5434 in recovery (read-only standby) = true

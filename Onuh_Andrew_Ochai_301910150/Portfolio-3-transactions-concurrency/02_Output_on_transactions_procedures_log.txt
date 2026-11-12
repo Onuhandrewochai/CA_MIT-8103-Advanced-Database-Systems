@@ -1,0 +1,161 @@
+12:30:47.819  [ INFO  ] PostgreSQL: 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
+
+
+============================================================================================
+SCENARIO 1: COMMIT — dispensing a prescription is atomic (stock, audit log, status)
+============================================================================================
+12:30:47.854  [  T1   ] SELECT medication_id, stock_qty FROM medication WHERE medication_id IN (1,2) ORDER BY 1  -> [(1, 100), (2, 100)]
+12:30:47.856  [  T1   ] CALL dispense_prescription(517112)  -> CALL
+12:30:47.857  [  T1   ] SELECT medication_id, stock_qty FROM medication WHERE medication_id IN (1,2) ORDER BY 1  -> [(1, 94), (2, 80)]
+12:30:47.857  [  T1   ] COMMIT
+12:30:47.859  [ CHECK ] stock after commit: [(1, 94), (2, 80)]
+12:30:47.861  [ CHECK ] audit rows: [(1, -6, 'DISPENSE'), (2, -20, 'DISPENSE')]
+12:30:47.864  [ CHECK ] dispensed_at set: [(True,)]
+
+============================================================================================
+SCENARIO 2: ROLLBACK — failure part-way through undoes the earlier updates (atomicity)
+============================================================================================
+12:30:47.892  [  T1   ] prescription needs 6 x med 1 (stock 100) and 10 x med 9 (stock 5)
+12:30:47.894  [  T1   ] ERROR 23514 new row for relation "medication" violates check constraint "medication_stock_qty_check"
+12:30:47.894  [  T1   ] ROLLBACK
+12:30:47.896  [ CHECK ] med 1 stock is still 100 (first UPDATE undone): [(100,)]
+12:30:47.899  [ CHECK ] no audit rows written: [(0,)]
+12:30:47.902  [ CHECK ] prescription not marked dispensed: [(None,)]
+
+============================================================================================
+SCENARIO 3: SAVEPOINT — partial rollback: slot taken, book the next one, keep the patient registration
+============================================================================================
+12:30:47.905  [  T1   ] INSERT INTO patient (hospital_no, first_name, last_name, date_of_birth, sex, phone) VALUES ('CBC-T000003','Temi','Adeyemi','1995-04-02','F','+2348090000003') RETURNING patient_id  -> [(100003,)]
+12:30:47.908  [  T1   ] try doctor 40 at 2026-11-07 11:45:00+01:00 (already booked)
+12:30:47.909  [  T1   ] SAVEPOINT before_booking  -> SAVEPOINT
+12:30:47.909  [  T1   ] ERROR 23505 duplicate key value violates unique constraint "uq_doctor_active_slot"
+12:30:47.909  [  T1   ] ROLLBACK TO SAVEPOINT before_booking  -> ROLLBACK
+12:30:47.910  [  T1   ] INSERT INTO appointment (patient_id, doctor_id, branch_id, scheduled_at) VALUES (100003,40,1,'2026-11-07T11:45:00+01:00'::timestamptz::timestamptz + interval '45 minutes') RETURNING appointment_id  -> [(1000002,)]
+12:30:47.911  [  T1   ] COMMIT
+12:30:47.913  [ CHECK ] patient + 1 appointment persisted: [('CBC-T000003', 1)]
+
+============================================================================================
+SCENARIO 4: LOST UPDATE — two pharmacists read-modify-write the same stock under READ COMMITTED
+============================================================================================
+12:30:47.942  [  T1   ] SELECT stock_qty FROM medication WHERE medication_id = 1  -> [(100,)]
+12:30:47.942  [  T2   ] SELECT stock_qty FROM medication WHERE medication_id = 1  -> [(100,)]
+12:30:47.942  [  T1   ] app computes 100 - 6 = 94
+12:30:47.943  [  T1   ] UPDATE medication SET stock_qty = 94 WHERE medication_id = 1  -> UPDATE 1
+12:30:47.943  [  T1   ] COMMIT
+12:30:47.943  [  T2   ] app computes 100 - 20 = 80  (based on a stale read)
+12:30:47.944  [  T2   ] UPDATE medication SET stock_qty = 80 WHERE medication_id = 1  -> UPDATE 1
+12:30:47.944  [  T2   ] COMMIT
+12:30:47.946  [ CHECK ] stock = 80; correct value is 74 -> LOST UPDATE: T1’s 6 units vanished
+
+============================================================================================
+SCENARIO 4b: FIX A — pessimistic locking with SELECT ... FOR UPDATE
+============================================================================================
+12:30:47.965  [  T1   ] SELECT stock_qty FROM medication WHERE medication_id = 1 FOR UPDATE  -> [(100,)]
+12:30:48.570  [MONITOR] pid 2303 WAITING on Lock/transactionid: SELECT stock_qty FROM medication WHERE medication_id = 1 FOR
+12:30:48.571  [  T1   ] UPDATE medication SET stock_qty = 94 WHERE medication_id = 1  -> UPDATE 1
+12:30:48.573  [  T1   ] COMMIT (releases row lock)
+12:30:48.573  [  T2   ] SELECT stock_qty FROM medication WHERE medication_id = 1 FOR UPDATE  -> [(94,)]
+12:30:48.573  [  T2   ] lock acquired, sees fresh value 94; app computes 94 - 20
+12:30:48.574  [  T2   ] UPDATE medication SET stock_qty = 74 WHERE medication_id = 1  -> UPDATE 1
+12:30:48.574  [  T2   ] COMMIT
+12:30:48.577  [ CHECK ] stock = 74 (expected 74)
+
+============================================================================================
+SCENARIO 4c: FIX B — let the database do the arithmetic atomically (no read-then-write)
+============================================================================================
+12:30:48.596  [  T1   ] UPDATE medication SET stock_qty = stock_qty - 6 WHERE medication_id = 1 RETURNING stock_qty  -> [(94,)]
+12:30:49.202  [MONITOR] pid 2313 WAITING on Lock/transactionid: UPDATE medication SET stock_qty = stock_qty - 20 WHERE medic
+12:30:49.203  [  T1   ] COMMIT
+12:30:49.203  [  T2   ] UPDATE medication SET stock_qty = stock_qty - 20 WHERE medication_id = 1 RETURNING stock_qty  -> [(74,)]
+12:30:49.204  [  T2   ] COMMIT
+12:30:49.207  [ CHECK ] stock = 74 (expected 74; T2 re-read the row after T1 committed)
+
+============================================================================================
+SCENARIO 5: NON-REPEATABLE READ — READ COMMITTED vs REPEATABLE READ snapshots
+============================================================================================
+12:30:49.230  [ INFO  ] --- T1 isolation = READ COMMITTED
+12:30:49.237  [  T1   ] SELECT stock_qty FROM medication WHERE medication_id = 2  -> [(100,)]
+12:30:49.238  [  T2   ] UPDATE medication SET stock_qty = 40 WHERE medication_id = 2  -> UPDATE 1
+12:30:49.239  [  T2   ] COMMIT
+12:30:49.239  [  T1   ] SELECT stock_qty FROM medication WHERE medication_id = 2  -> [(40,)]
+12:30:49.239  [ CHECK ] T1 read 100 then 40 inside ONE transaction -> non-repeatable read
+12:30:49.239  [ INFO  ] --- T1 isolation = REPEATABLE READ
+12:30:49.246  [  T1   ] SELECT stock_qty FROM medication WHERE medication_id = 2  -> [(100,)]
+12:30:49.246  [  T2   ] UPDATE medication SET stock_qty = 40 WHERE medication_id = 2  -> UPDATE 1
+12:30:49.247  [  T2   ] COMMIT
+12:30:49.247  [  T1   ] SELECT stock_qty FROM medication WHERE medication_id = 2  -> [(100,)]
+12:30:49.247  [ CHECK ] T1 read 100 then 100 inside ONE transaction -> stable snapshot
+
+============================================================================================
+SCENARIO 6: REPEATABLE READ update conflict -> serialization failure + application retry
+============================================================================================
+12:30:49.269  [  T1   ] SELECT stock_qty FROM medication WHERE medication_id = 1  -> [(100,)]
+12:30:49.270  [  T2   ] SELECT stock_qty FROM medication WHERE medication_id = 1  -> [(100,)]
+12:30:49.271  [  T1   ] UPDATE medication SET stock_qty = stock_qty - 6 WHERE medication_id = 1  -> UPDATE 1
+12:30:49.875  [MONITOR] pid 2334 WAITING on Lock/transactionid: UPDATE medication SET stock_qty = stock_qty - 20 WHERE medic
+12:30:49.876  [  T1   ] COMMIT
+12:30:49.876  [  T2   ] ERROR 40001 could not serialize access due to concurrent update
+12:30:49.876  [  T2   ] ROLLBACK
+12:30:49.877  [  T2   ] retrying the whole transaction with a fresh snapshot (standard pattern for SQLSTATE 40001)
+12:30:49.877  [  T2   ] UPDATE medication SET stock_qty = stock_qty - 20 WHERE medication_id = 1 RETURNING stock_qty  -> [(74,)]
+12:30:49.878  [  T2   ] COMMIT
+12:30:49.880  [ CHECK ] stock = 74 (expected 74)
+
+============================================================================================
+SCENARIO 7: WRITE SKEW — rule: every branch must keep >= 1 doctor on call
+============================================================================================
+12:30:49.882  [ INFO  ] --- both transactions at REPEATABLE READ
+12:30:49.908  [  T1   ] SELECT count(*) FROM doctor WHERE branch_id = 4 AND on_call  -> [(2,)]
+12:30:49.908  [  T2   ] SELECT count(*) FROM doctor WHERE branch_id = 4 AND on_call  -> [(2,)]
+12:30:49.908  [  T1   ] sees 2 on call -> safe for me (doctor 3) to go off call
+12:30:49.908  [  T2   ] sees 2 on call -> safe for me (doctor 7) to go off call
+12:30:49.909  [  T1   ] UPDATE doctor SET on_call = FALSE WHERE doctor_id = 3  -> UPDATE 1
+12:30:49.909  [  T2   ] UPDATE doctor SET on_call = FALSE WHERE doctor_id = 7  -> UPDATE 1
+12:30:49.910  [  T1   ] COMMIT
+12:30:49.910  [  T2   ] COMMIT
+12:30:49.912  [ CHECK ] doctors on call at branch 4 = 0 -> INVARIANT BROKEN (write skew)
+12:30:49.914  [ INFO  ] --- both transactions at SERIALIZABLE
+12:30:49.938  [  T1   ] SELECT count(*) FROM doctor WHERE branch_id = 4 AND on_call  -> [(2,)]
+12:30:49.938  [  T2   ] SELECT count(*) FROM doctor WHERE branch_id = 4 AND on_call  -> [(2,)]
+12:30:49.938  [  T1   ] sees 2 on call -> safe for me (doctor 3) to go off call
+12:30:49.938  [  T2   ] sees 2 on call -> safe for me (doctor 7) to go off call
+12:30:49.938  [  T1   ] UPDATE doctor SET on_call = FALSE WHERE doctor_id = 3  -> UPDATE 1
+12:30:49.939  [  T2   ] UPDATE doctor SET on_call = FALSE WHERE doctor_id = 7  -> UPDATE 1
+12:30:49.939  [  T1   ] COMMIT
+12:30:49.939  [  T2   ] ERROR 40001 could not serialize access due to read/write dependencies among transactions
+12:30:49.939  [  T2   ] ROLLBACK -> app would retry and now see only 1 on call
+12:30:49.942  [ CHECK ] doctors on call at branch 4 = 1 -> invariant holds
+
+============================================================================================
+SCENARIO 8: DEADLOCK — two pharmacists lock the same two drugs in opposite order
+============================================================================================
+12:30:49.964  [  T1   ] UPDATE medication SET stock_qty = stock_qty - 1 WHERE medication_id = 1  -> UPDATE 1
+12:30:49.965  [  T2   ] UPDATE medication SET stock_qty = stock_qty - 1 WHERE medication_id = 2  -> UPDATE 1
+12:30:50.170  [MONITOR] pid 2361 WAITING on Lock/transactionid: UPDATE medication SET stock_qty = stock_qty - 1 WHERE medica
+12:30:50.466  [  T1   ] ERROR 40P01 deadlock detected
+12:30:50.466  [  T2   ] UPDATE medication SET stock_qty = stock_qty - 1 WHERE medication_id = 1  -> UPDATE 1
+12:30:50.466  [  T1   ] ROLLBACK (chosen as victim)
+12:30:50.467  [  T2   ] COMMIT
+12:30:50.467  [ INFO  ] Prevention used in dispense_prescription(): always lock medication rows ORDER BY medication_id
+
+============================================================================================
+SCENARIO 9: RACE: two receptionists book the same doctor/slot at the same moment
+============================================================================================
+12:30:50.476  [  T1   ] INSERT INTO appointment (patient_id, doctor_id, branch_id, scheduled_at) VALUES ((SELECT min(patient_id) FROM patient), 7, 4, '2026-12-01 09:00+01') RETURNING appointment_id  -> [(1000003,)]
+12:30:51.076  [ INFO  ] T2 must WAIT: it cannot know whether T1's uncommitted row will survive
+12:30:51.081  [MONITOR] pid 2367 WAITING on Lock/transactionid: INSERT INTO appointment (patient_id, doctor_id, branch_id, s
+12:30:51.082  [  T1   ] COMMIT
+12:30:51.082  [  T2   ] ERROR 23505 duplicate key value violates unique constraint "uq_doctor_active_slot"
+12:30:51.082  [  T2   ] ROLLBACK -> receptionist offered another slot
+12:30:51.085  [ CHECK ] active bookings for that slot: [(1,)]
+
+============================================================================================
+SCENARIO 10: RACE: two cashiers both take full payment for the same invoice
+============================================================================================
+12:30:51.189  [  T1   ] INSERT INTO payment (invoice_id, amount, method) VALUES (794845, 12500, 'CARD')  -> INSERT 0 1
+12:30:51.789  [ INFO  ] trigger's SELECT ... FOR UPDATE on the invoice row serialises the two cashiers
+12:30:51.794  [MONITOR] pid 2377 WAITING on Lock/transactionid: INSERT INTO payment (invoice_id, amount, method) VALUES (794
+12:30:51.794  [  T1   ] COMMIT
+12:30:51.795  [  T2   ] ERROR P0001 Over-payment on invoice 794845: due 12500.00, already paid 12500.00, attempted 12500.00
+12:30:51.795  [  T2   ] ROLLBACK
+12:30:51.801  [ CHECK ] invoice_balance: [(Decimal('12500.00'), Decimal('12500.00'), Decimal('0.00'))], status: [('PAID',)]

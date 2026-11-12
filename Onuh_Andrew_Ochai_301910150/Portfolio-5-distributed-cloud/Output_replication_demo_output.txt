@@ -1,0 +1,67 @@
+
+==========================================================================================
+A. Topology: one primary, two streaming standbys
+==========================================================================================
+   replica1  state=streaming sync_state=async  priority=0 replay_lag_bytes=0
+   replica2  state=streaming sync_state=async  priority=0 replay_lag_bytes=0
+   :5433 pg_is_in_recovery = True, appointments visible = 1,000,000
+   :5434 pg_is_in_recovery = True, appointments visible = 1,000,000
+   write attempted on replica2 -> ERROR 25006: cannot execute INSERT in a read-only transaction
+
+==========================================================================================
+B. Asynchronous replication lag (time until a committed row is visible on each standby)
+==========================================================================================
+   50 single-row commits. Visibility delay  replica1: median 0.38 ms, max 0.79 ms
+                                           replica2: median 0.55 ms, max 1.45 ms
+   Bulk write (200,000 rows in one transaction) while sampling lag in bytes:
+   peak replay lag observed: 15,356 KB of WAL; after catch-up:
+   replica1  state=streaming sync_state=async  priority=0 replay_lag_bytes=0
+   replica2  state=streaming sync_state=async  priority=0 replay_lag_bytes=0
+
+==========================================================================================
+C. Consistency: stale reads (async) vs read-your-writes (synchronous_commit = remote_apply)
+==========================================================================================
+   replica1  state=streaming sync_state=sync   priority=1 replay_lag_bytes=0
+   replica2  state=streaming sync_state=async  priority=0 replay_lag_bytes=0
+   write on primary, read IMMEDIATELY from async replica2 (local):        stale reads = 200/200
+   write on primary, read IMMEDIATELY from sync replica1 (remote_apply):  stale reads = 0/200
+
+==========================================================================================
+D. Commit latency by synchronous_commit level (replica1 is the synchronous standby)
+==========================================================================================
+   synchronous_commit = off          median commit 0.066 ms
+   synchronous_commit = local        median commit 0.714 ms
+   synchronous_commit = remote_write median commit 0.704 ms
+   synchronous_commit = on           median commit 0.867 ms
+   synchronous_commit = remote_apply median commit 1.004 ms
+   (single machine, so network latency is ~0; across availability zones each sync level adds a round trip)
+
+==========================================================================================
+E. Availability trade-off: the only synchronous standby fails
+==========================================================================================
+   replica1 stopped (waiting for server to shut down.... done
+server stopped)
+   COMMIT still waiting after 3 s -> pg_stat_activity: [('IPC', 'SyncRep', 'active')]
+   cancelled after 3.0 s. Server notices:
+     WARNING:  canceling wait for synchronous replication due to user request | DETAIL:  The transaction has already committed locally, but might not have been replicated to the standby.
+   row visible on primary anyway? 1 -> it committed LOCALLY but was not confirmed by a standby
+   switched to quorum 'ANY 1 (replica1, replica2)' -> commit succeeded in 5.20 ms (replica2 acknowledged)
+   replica2  state=streaming sync_state=quorum priority=1 replay_lag_bytes=0
+   replica1 restarted and caught up:
+   replica1  state=streaming sync_state=quorum priority=1 replay_lag_bytes=0
+   replica2  state=streaming sync_state=quorum priority=1 replay_lag_bytes=0
+
+==========================================================================================
+F. Failover: primary crashes, replica1 is promoted
+==========================================================================================
+   committed row id 403913 (synchronous) — then simulate a crash with `pg_ctl stop -m immediate`
+   primary unreachable: connection refused
+   pg_ctl promote replica1 -> waiting for server to promote.... done
+server promoted
+   replica1 (:5433) is now primary; accepted a write 0.22 s after the crash  (RTO, excluding failure detection)
+   last synchronous commit (id 403913) present on new primary: True  -> RPO = 0 transactions lost
+   WAL timeline on new primary: 2 (was 1; promotion starts a new timeline so old and new histories can't be confused)
+   replica2 still follows the dead primary; re-point it at the new primary:
+   new primary's pg_stat_replication: [('replica2', 'streaming')]
+   replica2 sees the post-failover write: True
+   The old primary must NOT simply be restarted (split brain / diverged WAL): rebuild it with pg_rewind or pg_basebackup.

@@ -1,0 +1,132 @@
+== Row distribution (seen from the coordinator)
+   partition    |  rows  
+----------------+--------
+ appointment_s0 | 500566
+ appointment_s1 | 499434
+(2 rows)
+
+== Same counts read DIRECTLY on each shard server
+You are now connected to database "postgres" as user "postgres" on host "localhost" (address "127.0.0.1") at port "5441".
+    server     | count  
+---------------+--------
+ shard_a :5441 | 500566
+(1 row)
+
+You are now connected to database "postgres" as user "postgres" on host "localhost" (address "127.0.0.1") at port "5442".
+    server     | count  
+---------------+--------
+ shard_b :5442 | 499434
+(1 row)
+
+You are now connected to database "carebridge_dist" as user "postgres" on host "localhost" (address "127.0.0.1") at port "5432".
+== Q1 single-shard query: patient history. Shard key in WHERE -> partition pruning -> ONE remote scan
+                                                                          QUERY PLAN                                                                           
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit
+   Output: appointment.appointment_id, appointment.scheduled_at, appointment.status
+   ->  Foreign Scan on public.appointment_s0 appointment
+         Output: appointment.appointment_id, appointment.scheduled_at, appointment.status
+         Remote SQL: SELECT appointment_id, scheduled_at, status FROM public.appointment_p0 WHERE ((patient_id = 4321)) ORDER BY scheduled_at DESC NULLS FIRST
+ Query Identifier: 317285556734495678
+(6 rows)
+
+ appointment_id |      scheduled_at      |  status   
+----------------+------------------------+-----------
+         973508 | 2026-10-11 08:00:00+01 | COMPLETED
+         969010 | 2026-10-06 10:15:00+01 | NO_SHOW
+         949996 | 2026-09-16 11:00:00+01 | COMPLETED
+         938944 | 2026-09-05 08:00:00+01 | CANCELLED
+         926376 | 2026-08-22 13:15:00+01 | COMPLETED
+(5 rows)
+
+== Q2a scatter-gather, DEFAULT settings: both shards scanned, every matching row shipped to the coordinator
+                                                                                QUERY PLAN                                                                                
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate (actual time=254.718..254.721 rows=4 loops=1)
+   Output: appointment.branch_id, count(*)
+   Group Key: appointment.branch_id
+   Batches: 1  Memory Usage: 40kB
+   ->  Append (actual time=17.994..220.181 rows=350400 loops=1)
+         ->  Foreign Scan on public.appointment_s0 appointment_1 (actual time=17.993..99.679 rows=175626 loops=1)
+               Output: appointment_1.branch_id
+               Remote SQL: SELECT branch_id FROM public.appointment_p0 WHERE ((scheduled_at >= '2025-01-01 00:00:00+01')) AND ((scheduled_at < '2026-01-01 00:00:00+01'))
+         ->  Foreign Scan on public.appointment_s1 appointment_2 (actual time=17.511..97.377 rows=174774 loops=1)
+               Output: appointment_2.branch_id
+               Remote SQL: SELECT branch_id FROM public.appointment_p1 WHERE ((scheduled_at >= '2025-01-01 00:00:00+01')) AND ((scheduled_at < '2026-01-01 00:00:00+01'))
+ Query Identifier: -6482212161228432127
+ Planning Time: 3.352 ms
+ Execution Time: 255.007 ms
+(14 rows)
+
+== Q2b same query with enable_partitionwise_aggregate = on: aggregation split per shard, but PG16 postgres_fdw
+        cannot push PARTIAL aggregates, so rows are still shipped (branch_id is not the shard key)
+SET
+                                                                                      QUERY PLAN                                                                                      
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate (actual time=165.114..165.118 rows=4 loops=1)
+   Output: appointment.branch_id, count(*)
+   Group Key: appointment.branch_id
+   ->  Sort (actual time=165.109..165.112 rows=8 loops=1)
+         Output: appointment.branch_id, (PARTIAL count(*))
+         Sort Key: appointment.branch_id
+         Sort Method: quicksort  Memory: 25kB
+         ->  Append (actual time=82.674..165.086 rows=8 loops=1)
+               ->  Partial HashAggregate (actual time=82.672..82.675 rows=4 loops=1)
+                     Output: appointment.branch_id, PARTIAL count(*)
+                     Group Key: appointment.branch_id
+                     Batches: 1  Memory Usage: 40kB
+                     ->  Foreign Scan on public.appointment_s0 appointment (actual time=10.497..68.652 rows=175626 loops=1)
+                           Output: appointment.branch_id
+                           Remote SQL: SELECT branch_id FROM public.appointment_p0 WHERE ((scheduled_at >= '2025-01-01 00:00:00+01')) AND ((scheduled_at < '2026-01-01 00:00:00+01'))
+               ->  Partial HashAggregate (actual time=82.404..82.406 rows=4 loops=1)
+                     Output: appointment_1.branch_id, PARTIAL count(*)
+                     Group Key: appointment_1.branch_id
+                     Batches: 1  Memory Usage: 40kB
+                     ->  Foreign Scan on public.appointment_s1 appointment_1 (actual time=10.530..69.476 rows=174774 loops=1)
+                           Output: appointment_1.branch_id
+                           Remote SQL: SELECT branch_id FROM public.appointment_p1 WHERE ((scheduled_at >= '2025-01-01 00:00:00+01')) AND ((scheduled_at < '2026-01-01 00:00:00+01'))
+ Query Identifier: -6482212161228432127
+ Planning Time: 1.027 ms
+ Execution Time: 165.399 ms
+(25 rows)
+
+== Q2c GROUP BY the shard key (patient_id): FULL aggregate pushdown, each shard runs GROUP BY itself
+                                                                                              QUERY PLAN                                                                                              
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit (actual time=205.339..205.342 rows=5 loops=1)
+   Output: appointment.patient_id, (count(*))
+   ->  Sort (actual time=205.337..205.338 rows=5 loops=1)
+         Output: appointment.patient_id, (count(*))
+         Sort Key: (count(*)) DESC
+         Sort Method: top-N heapsort  Memory: 25kB
+         ->  Append (actual time=37.159..201.100 rows=94152 loops=1)
+               ->  Foreign Scan (actual time=37.158..103.359 rows=47171 loops=1)
+                     Output: appointment.patient_id, (count(*))
+                     Relations: Aggregate on (public.appointment_s0 appointment)
+                     Remote SQL: SELECT patient_id, count(*) FROM public.appointment_p0 WHERE ((scheduled_at >= '2025-01-01 00:00:00+01')) AND ((scheduled_at < '2026-01-01 00:00:00+01')) GROUP BY 1
+               ->  Foreign Scan (actual time=33.401..92.648 rows=46981 loops=1)
+                     Output: appointment_1.patient_id, (count(*))
+                     Relations: Aggregate on (public.appointment_s1 appointment_1)
+                     Remote SQL: SELECT patient_id, count(*) FROM public.appointment_p1 WHERE ((scheduled_at >= '2025-01-01 00:00:00+01')) AND ((scheduled_at < '2026-01-01 00:00:00+01')) GROUP BY 1
+ Query Identifier: 8834658203521799400
+ Planning Time: 2.119 ms
+ Execution Time: 205.569 ms
+(18 rows)
+
+RESET
+        name         | visits_2025 
+---------------------+-------------
+ CareBridge Abeokuta |       87600
+ CareBridge Ikeja    |       87600
+ CareBridge Lekki    |       87600
+ CareBridge Yaba     |       87600
+(4 rows)
+
+== Q3 an INSERT is routed to the correct shard by hash(patient_id)
+INSERT 0 1
+   landed_on    | appointment_id | patient_id 
+----------------+----------------+------------
+ appointment_s0 |        9000001 |       4321
+(1 row)
+
+DELETE 1
